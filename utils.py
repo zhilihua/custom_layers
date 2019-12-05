@@ -52,3 +52,108 @@ def convert_coordinates(tensor, start_index, conversion, border_pixels='half'):
         raise ValueError("Unexpected conversion value. Supported values are 'minmax2centroids', 'centroids2minmax', 'corners2centroids', 'centroids2corners', 'minmax2corners', and 'corners2minmax'.")
 
     return tensor1
+
+#===========================包围框工具===============================
+def intersection_area_(boxes1, boxes2,  mode='outer_product'):
+    m = boxes1.shape[0]
+    n = boxes2.shape[0]
+
+    xmin = 0
+    ymin = 1
+    xmax = 2
+    ymax = 3
+
+    if mode == 'outer_product':
+
+        min_xy = np.maximum(np.tile(np.expand_dims(boxes1[:, [xmin, ymin]], axis=1), reps=(1, n, 1)),
+                            np.tile(np.expand_dims(boxes2[:, [xmin, ymin]], axis=0), reps=(m, 1, 1)))
+
+        max_xy = np.minimum(np.tile(np.expand_dims(boxes1[:, [xmax, ymax]], axis=1), reps=(1, n, 1)),
+                            np.tile(np.expand_dims(boxes2[:, [xmax, ymax]], axis=0), reps=(m, 1, 1)))
+
+        side_lengths = np.maximum(0, max_xy - min_xy)
+
+        return side_lengths[:, :, 0] * side_lengths[:, :, 1]
+
+    elif mode == 'element-wise':
+
+        min_xy = np.maximum(boxes1[:, [xmin, ymin]], boxes2[:, [xmin, ymin]])
+        max_xy = np.minimum(boxes1[:, [xmax, ymax]], boxes2[:, [xmax, ymax]])
+
+        side_lengths = np.maximum(0, max_xy - min_xy)
+
+        return side_lengths[:, 0] * side_lengths[:, 1]
+
+def iou(boxes1, boxes2, mode='outer_product', border_pixels='half'):
+    if boxes1.ndim == 1: boxes1 = np.expand_dims(boxes1, axis=0)
+    if boxes2.ndim == 1: boxes2 = np.expand_dims(boxes2, axis=0)
+
+    boxes1 = convert_coordinates(boxes1, start_index=0, conversion='centroids2corners')
+    boxes2 = convert_coordinates(boxes2, start_index=0, conversion='centroids2corners')
+
+    intersection_areas = intersection_area_(boxes1, boxes2, mode=mode)
+
+    m = boxes1.shape[0]
+    n = boxes2.shape[0]
+
+    xmin = 0
+    ymin = 1
+    xmax = 2
+    ymax = 3
+
+    if border_pixels == 'half':
+        d = 0
+    elif border_pixels == 'include':
+        d = 1
+    elif border_pixels == 'exclude':
+        d = -1
+
+    if mode == 'outer_product':
+
+        boxes1_areas = np.tile(
+            np.expand_dims((boxes1[:, xmax] - boxes1[:, xmin] + d) * (boxes1[:, ymax] - boxes1[:, ymin] + d), axis=1),
+            reps=(1, n))
+        boxes2_areas = np.tile(
+            np.expand_dims((boxes2[:, xmax] - boxes2[:, xmin] + d) * (boxes2[:, ymax] - boxes2[:, ymin] + d), axis=0),
+            reps=(m, 1))
+
+    elif mode == 'element-wise':
+
+        boxes1_areas = (boxes1[:, xmax] - boxes1[:, xmin] + d) * (boxes1[:, ymax] - boxes1[:, ymin] + d)
+        boxes2_areas = (boxes2[:, xmax] - boxes2[:, xmin] + d) * (boxes2[:, ymax] - boxes2[:, ymin] + d)
+
+    union_areas = boxes1_areas + boxes2_areas - intersection_areas
+
+    return intersection_areas / union_areas
+
+#==============================真值匹配工具============================
+def match_bipartite_greedy(weight_matrix):
+    weight_matrix = np.copy(weight_matrix)
+    num_ground_truth_boxes = weight_matrix.shape[0]
+    all_gt_indices = list(range(num_ground_truth_boxes))
+
+    matches = np.zeros(num_ground_truth_boxes, dtype=np.int)
+
+    for _ in range(num_ground_truth_boxes):
+        anchor_indices = np.argmax(weight_matrix, axis=1) # 选取最大的值索引
+        overlaps = weight_matrix[all_gt_indices, anchor_indices]
+        ground_truth_index = np.argmax(overlaps)
+        anchor_index = anchor_indices[ground_truth_index]
+        matches[ground_truth_index] = anchor_index
+
+        weight_matrix[ground_truth_index] = 0
+        weight_matrix[:, anchor_index] = 0
+
+    return matches
+
+def match_multi(weight_matrix, threshold):
+    num_anchor_boxes = weight_matrix.shape[1]
+    all_anchor_indices = list(range(num_anchor_boxes))
+
+    ground_truth_indices = np.argmax(weight_matrix, axis=0)
+    overlaps = weight_matrix[ground_truth_indices, all_anchor_indices]
+
+    anchor_indices_thresh_met = np.nonzero(overlaps >= threshold)[0]
+    gt_indices_thresh_met = ground_truth_indices[anchor_indices_thresh_met]
+
+    return gt_indices_thresh_met, anchor_indices_thresh_met
